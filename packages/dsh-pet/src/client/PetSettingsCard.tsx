@@ -5,11 +5,15 @@
  * as the content of the top-level 'settings.section' nav entry. The petId
  * choices come from the registry endpoint ('/api/pet/pets') — the same list
  * the sprite renders from — so the card carries no per-pet knowledge.
+ *
+ * The card's registry requests follow the master switch: the Host registers
+ * '/api/pet/*' only while the pet is enabled, so a disabled pet has no
+ * endpoint to answer and the card loads only once the switch is on.
  */
 
 import type { ReactNode } from 'react'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { SettingsScope, SettingsScopeSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
 // Type-only: pulls the settings-surface SlotMap merge (the 'settings.section' entry).
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
@@ -65,6 +69,25 @@ export interface PetSettingsCardFace extends CardActions {
   }
 }
 
+/**
+ * Whether the pet master switch is on for a 'pet' scope snapshot.
+ *
+ * The Host registers its '/api/pet/*' routes only while the switch is on, so
+ * every browser-side consumer — the floating sprite and the settings card's
+ * registry load — reads the same verdict here instead of each inventing one.
+ * An unset switch means on (the schema default). A namespace the deployment
+ * does not serve counts as on, because there is no switch to consult; a
+ * namespace still loading counts as off, so the load waits for the verdict
+ * rather than firing against routes that may not exist yet.
+ * @param snapshot - the bound 'pet' settings scope snapshot.
+ * @returns whether the pet is enabled.
+ */
+export function petEnabled(snapshot: SettingsScopeSnapshot<PetSettings>): boolean {
+  return snapshot.status === 'ready'
+    ? snapshot.value?.enabled ?? true
+    : snapshot.status === 'unavailable'
+}
+
 /** One registry choice as served by '/api/pet/pets'. */
 interface PetChoice {
   id: string
@@ -103,13 +126,23 @@ export class PetSettingsCardController {
   private readonly petLabels = new Map<string, string>()
   private diagnostics: PetDiagnosticView[] = []
   private loaded = false
+  private diagnosticsLoaded = false
+  /** In-flight guards: a settings change during a load must not start a second one. */
+  private petsLoading = false
+  private diagnosticsLoading = false
+  /** Whether a failed pets load already armed its retry timer. */
+  private retryScheduled = false
   private attempts = 0
+  /** The master-switch verdict the previous load decision saw. */
+  private wasEnabled = false
   private disposed = false
+  /** The controller's own scope subscription; released by dispose(). */
+  private readonly disposeScope: () => void
   /** Pending deferred-load or retry timer; cancelled by dispose(). */
   private pendingTimer: number | undefined
 
   /** @param scope - the bound settings scope for the 'pet' namespace. */
-  constructor(scope: SettingsScope<PetSettings>) {
+  constructor(private readonly scope: SettingsScope<PetSettings>) {
     this.form = new CardForm(scope, [
       booleanField('enabled'),
       booleanField('decorationEnabled'),
@@ -120,32 +153,74 @@ export class PetSettingsCardController {
       choiceField('petId', this.petChoices),
     ])
     this.store = this.form.bind(() => this.projection())
+    // The registry endpoints exist only while the master switch is on, so a
+    // load is attempted when the switch permits it and retried when a later
+    // settings change turns it on.
+    this.disposeScope = scope.subscribe(() => { this.syncLoad() })
     // Client plugins are applied synchronously during shell startup. Defer
     // the first registry request until that pass completes so transport
     // plugins (notably remote-web-ui on a paired non-loopback origin) can
     // install their fetch channel before /api/pet/pets is issued.
     this.pendingTimer = window.setTimeout(() => {
       this.pendingTimer = undefined
-      if (this.disposed) return
-      void this.loadPets()
-      void this.loadDiagnostics()
+      this.syncLoad()
     }, 0)
+  }
+
+  /** Whether the master switch currently permits the registry endpoints to exist. */
+  private enabled(): boolean {
+    return petEnabled(this.scope.getSnapshot())
+  }
+
+  /** Load whatever the registry still owes, while the master switch permits it. */
+  private syncLoad(): void {
+    const enabled = this.enabled()
+    // A switch that just came back on earns a fresh retry budget: the
+    // endpoints were withdrawn in between, so the earlier failures say
+    // nothing about the routes that exist now.
+    if (enabled && !this.wasEnabled) this.attempts = 0
+    if (!enabled && this.retryScheduled) {
+      // The routes are gone; drop the armed retry so re-enabling loads at
+      // once instead of waiting out a timer that would fail again.
+      this.cancelPendingTimer()
+      this.retryScheduled = false
+    }
+    this.wasEnabled = enabled
+    if (this.disposed || !enabled) return
+    if (!this.loaded && !this.petsLoading && !this.retryScheduled) void this.loadPets()
+    if (!this.diagnosticsLoaded && !this.diagnosticsLoading) void this.loadDiagnostics()
+  }
+
+  /** Drop the armed deferred-load or retry timer, if any. */
+  private cancelPendingTimer(): void {
+    if (this.pendingTimer === undefined) return
+    window.clearTimeout(this.pendingTimer)
+    this.pendingTimer = undefined
   }
 
   /** Fetch registry diagnostics once (soft-fail: an empty list on error). */
   private async loadDiagnostics(): Promise<void> {
+    if (this.diagnosticsLoaded || this.disposed) return
+    this.diagnosticsLoading = true
     try {
-      this.diagnostics = await fetchPetDiagnostics()
+      const diagnostics = await fetchPetDiagnostics()
       if (this.disposed) return
+      this.diagnostics = diagnostics
       this.store.set(this.projection())
     } catch {
+      // A deployment whose diagnostics route is absent or failing still gets
+      // the card: the chooser carries the section, the hints are extra.
       this.diagnostics = []
+    } finally {
+      this.diagnosticsLoading = false
+      this.diagnosticsLoaded = true
     }
   }
 
   /** Resolve the registry choices once (retried a few times on failure). */
   private async loadPets(): Promise<void> {
     if (this.loaded || this.disposed) return
+    this.petsLoading = true
     try {
       const list = await fetchPetChoices()
       if (this.disposed) return
@@ -157,12 +232,17 @@ export class PetSettingsCardController {
       if (this.disposed) return
       this.attempts += 1
       if (this.attempts < 3) {
+        this.retryScheduled = true
         this.pendingTimer = window.setTimeout(() => {
           this.pendingTimer = undefined
-          if (this.disposed) return
-          void this.loadPets()
+          this.retryScheduled = false
+          // Re-check the switch: a retry that fires after the pet was turned
+          // off must not issue another request against its withdrawn routes.
+          this.syncLoad()
         }, 3000)
       }
+    } finally {
+      this.petsLoading = false
     }
   }
 
@@ -190,16 +270,14 @@ export class PetSettingsCardController {
   }
 
   /**
-   * Release the card's scope subscription, bound stores and pending load
+   * Release the card's scope subscriptions, bound stores and pending load
    * timers; the slot disposer calls this on teardown.
    */
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
-    if (this.pendingTimer !== undefined) {
-      window.clearTimeout(this.pendingTimer)
-      this.pendingTimer = undefined
-    }
+    this.cancelPendingTimer()
+    this.disposeScope()
     this.form.dispose()
   }
 }

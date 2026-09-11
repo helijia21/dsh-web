@@ -20259,6 +20259,22 @@ window.__ModuleLoader__.load({
 		};
 		//#endregion
 		//#region ../dsh-pet/src/client/PetSettingsCard.tsx
+		/**
+		* Whether the pet master switch is on for a 'pet' scope snapshot.
+		*
+		* The Host registers its '/api/pet/*' routes only while the switch is on, so
+		* every browser-side consumer — the floating sprite and the settings card's
+		* registry load — reads the same verdict here instead of each inventing one.
+		* An unset switch means on (the schema default). A namespace the deployment
+		* does not serve counts as on, because there is no switch to consult; a
+		* namespace still loading counts as off, so the load waits for the verdict
+		* rather than firing against routes that may not exist yet.
+		* @param snapshot - the bound 'pet' settings scope snapshot.
+		* @returns whether the pet is enabled.
+		*/
+		function petEnabled(snapshot) {
+			return snapshot.status === "ready" ? snapshot.value?.enabled ?? true : snapshot.status === "unavailable";
+		}
 		/** Fetch the registry list (the same data the sprite renders from). */
 		async function fetchPetChoices() {
 			const response = await fetch("/api/pet/pets");
@@ -20273,18 +20289,30 @@ window.__ModuleLoader__.load({
 		}
 		/** Bridges the 'pet' scope onto the card's staged form. */
 		var PetSettingsCardController = class {
+			scope;
 			form;
 			store;
 			petChoices = [];
 			petLabels = /* @__PURE__ */ new Map();
 			diagnostics = [];
 			loaded = false;
+			diagnosticsLoaded = false;
+			/** In-flight guards: a settings change during a load must not start a second one. */
+			petsLoading = false;
+			diagnosticsLoading = false;
+			/** Whether a failed pets load already armed its retry timer. */
+			retryScheduled = false;
 			attempts = 0;
+			/** The master-switch verdict the previous load decision saw. */
+			wasEnabled = false;
 			disposed = false;
+			/** The controller's own scope subscription; released by dispose(). */
+			disposeScope;
 			/** Pending deferred-load or retry timer; cancelled by dispose(). */
 			pendingTimer;
 			/** @param scope - the bound settings scope for the 'pet' namespace. */
 			constructor(scope) {
+				this.scope = scope;
 				this.form = new CardForm$2(scope, [
 					booleanField$2("enabled"),
 					booleanField$2("decorationEnabled"),
@@ -20295,26 +20323,57 @@ window.__ModuleLoader__.load({
 					choiceField$1("petId", this.petChoices)
 				]);
 				this.store = this.form.bind(() => this.projection());
+				this.disposeScope = scope.subscribe(() => {
+					this.syncLoad();
+				});
 				this.pendingTimer = window.setTimeout(() => {
 					this.pendingTimer = void 0;
-					if (this.disposed) return;
-					this.loadPets();
-					this.loadDiagnostics();
+					this.syncLoad();
 				}, 0);
+			}
+			/** Whether the master switch currently permits the registry endpoints to exist. */
+			enabled() {
+				return petEnabled(this.scope.getSnapshot());
+			}
+			/** Load whatever the registry still owes, while the master switch permits it. */
+			syncLoad() {
+				const enabled = this.enabled();
+				if (enabled && !this.wasEnabled) this.attempts = 0;
+				if (!enabled && this.retryScheduled) {
+					this.cancelPendingTimer();
+					this.retryScheduled = false;
+				}
+				this.wasEnabled = enabled;
+				if (this.disposed || !enabled) return;
+				if (!this.loaded && !this.petsLoading && !this.retryScheduled) this.loadPets();
+				if (!this.diagnosticsLoaded && !this.diagnosticsLoading) this.loadDiagnostics();
+			}
+			/** Drop the armed deferred-load or retry timer, if any. */
+			cancelPendingTimer() {
+				if (this.pendingTimer === void 0) return;
+				window.clearTimeout(this.pendingTimer);
+				this.pendingTimer = void 0;
 			}
 			/** Fetch registry diagnostics once (soft-fail: an empty list on error). */
 			async loadDiagnostics() {
+				if (this.diagnosticsLoaded || this.disposed) return;
+				this.diagnosticsLoading = true;
 				try {
-					this.diagnostics = await fetchPetDiagnostics();
+					const diagnostics = await fetchPetDiagnostics();
 					if (this.disposed) return;
+					this.diagnostics = diagnostics;
 					this.store.set(this.projection());
 				} catch {
 					this.diagnostics = [];
+				} finally {
+					this.diagnosticsLoading = false;
+					this.diagnosticsLoaded = true;
 				}
 			}
 			/** Resolve the registry choices once (retried a few times on failure). */
 			async loadPets() {
 				if (this.loaded || this.disposed) return;
+				this.petsLoading = true;
 				try {
 					const list = await fetchPetChoices();
 					if (this.disposed) return;
@@ -20325,11 +20384,16 @@ window.__ModuleLoader__.load({
 				} catch {
 					if (this.disposed) return;
 					this.attempts += 1;
-					if (this.attempts < 3) this.pendingTimer = window.setTimeout(() => {
-						this.pendingTimer = void 0;
-						if (this.disposed) return;
-						this.loadPets();
-					}, 3e3);
+					if (this.attempts < 3) {
+						this.retryScheduled = true;
+						this.pendingTimer = window.setTimeout(() => {
+							this.pendingTimer = void 0;
+							this.retryScheduled = false;
+							this.syncLoad();
+						}, 3e3);
+					}
+				} finally {
+					this.petsLoading = false;
 				}
 			}
 			projection() {
@@ -20360,16 +20424,14 @@ window.__ModuleLoader__.load({
 				};
 			}
 			/**
-			* Release the card's scope subscription, bound stores and pending load
+			* Release the card's scope subscriptions, bound stores and pending load
 			* timers; the slot disposer calls this on teardown.
 			*/
 			dispose() {
 				if (this.disposed) return;
 				this.disposed = true;
-				if (this.pendingTimer !== void 0) {
-					window.clearTimeout(this.pendingTimer);
-					this.pendingTimer = void 0;
-				}
+				this.cancelPendingTimer();
+				this.disposeScope();
 				this.form.dispose();
 			}
 		};
@@ -20861,10 +20923,7 @@ window.__ModuleLoader__.load({
 			defaultPetRendererRegistry.register(live2dRenderer);
 			defaultPetRendererRegistry.register(frames2dRenderer);
 			const settingsScope = (ctx.get("webUiSettings") ?? ctx.settingsScope).bind({ namespace: PET_SETTINGS_NS });
-			const enabled = () => {
-				const snapshot = settingsScope.getSnapshot();
-				return snapshot.status === "ready" ? snapshot.value?.enabled ?? true : snapshot.status === "unavailable";
-			};
+			const enabled = () => petEnabled(settingsScope.getSnapshot());
 			const petSettings = new PetSettingsCardController(settingsScope);
 			ctx.slots.inject("settings.section", () => {
 				try {

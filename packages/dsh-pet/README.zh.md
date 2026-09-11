@@ -296,6 +296,7 @@ dsh-pet/
 - **挂载点**：`document.body`（全局 React 根，始终显示：无会话 / 新会话 / 会话中都可见——旧挂载点 `conversation.composer.dock` 只在活动会话里渲染，新会话里宠物消失）；组件内部用 `createPortal` 渲染全局浮层。根容器随插件 fiber 生命周期走：fiber 销毁时卸载 React 根、移除容器并停止轮询与设置订阅；热重载或重复注入的新 bundle 接管页面级单挂载槽，页面始终只有一个 `[data-dsh-pet-root]`（issue #785）。
 - **渲染**：CSS 精灵（background-position）逐帧动画；帧时长和可选场景序列来自下发定义。悬浮面板锚定在宠物下方，间隙由指针桥接覆盖；当视口下方空间不足时，面板翻转到宠物上方并抬升到状态气泡栈之上，两者互不遮挡。
 - **通信**：浏览器 ↔ 宿主走同源 `/api/pet/*` JSON 端点（state/pets/interact/set-visible/set-config/set-name/set-pet）；每只宠物的图集从 `/pet/<id>/<spritesheetPath>` 加载——插件自给自足地提供自己的 API 与资源（与 dsh-remote-web-ui 的 `/api/pair` 同一模式）。
+- **总开关**：`enabled` 决定 `/api/pet/*` 路由的生命周期——宿主在开关打开时注册、关闭时撤销。浏览器两个消费者都跟随该结论：悬浮精灵停止轮询，设置卡片不再发起注册表请求。宠物关闭时设置卡片本身保持注册，因为用户正是在这里重新打开开关。
 
 ## 安装
 

@@ -37,7 +37,7 @@ import { defaultPetRendererRegistry } from './renderers/registry.ts'
 import { live2dRenderer } from './renderers/live2d.ts'
 import { frames2dRenderer } from './renderers/frames2d.ts'
 import { registerPetUiTeardown, takeoverPetUiTeardown } from './ui-teardown.ts'
-import { PetSettingsSection, PetSettingsCardController, type PetSettings } from './PetSettingsCard.tsx'
+import { PetSettingsSection, PetSettingsCardController, petEnabled, type PetSettings } from './PetSettingsCard.tsx'
 import { NS, en, zh, t } from './locales.ts'
 import { reportDailyHeartbeat } from './telemetry.ts'
 
@@ -154,12 +154,9 @@ export function apply(ctx: ClientContext): void {
 
   const binder = ctx.get('webUiSettings') ?? ctx.settingsScope
   const settingsScope = binder.bind<PetSettings>({ namespace: PET_SETTINGS_NS })
-  const enabled = (): boolean => {
-    const snapshot = settingsScope.getSnapshot()
-    return snapshot.status === 'ready'
-      ? snapshot.value?.enabled ?? true
-      : snapshot.status === 'unavailable'
-  }
+  // The floating sprite and the settings card's registry load read the same
+  // verdict: the Host registers '/api/pet/*' only while the switch is on.
+  const enabled = (): boolean => petEnabled(settingsScope.getSnapshot())
 
   // First-level settings section: one staged form over the 'pet' settings
   // namespace, registered as a top-level settings page. The controller loads

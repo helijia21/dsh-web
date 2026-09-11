@@ -31,7 +31,7 @@ import { PetSettingsCardController, type PetSettings } from '../src/client/PetSe
 function fakeScope(): SettingsScope<PetSettings> {
   return {
     subscribe: () => () => {},
-    getSnapshot: () => ({ value: {}, base: {}, user: {}, writable: true }),
+    getSnapshot: () => ({ status: 'ready', value: {}, base: {}, user: {}, writable: true }),
     set: async () => {},
     unset: async () => {},
   } as unknown as SettingsScope<PetSettings>
