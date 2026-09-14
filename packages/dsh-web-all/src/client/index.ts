@@ -16,7 +16,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { mountClientChildren } from './mount-children.ts'
-import { subscribeBodyMutations } from './body-mutations.ts'
+import { subscribeBodyInvalidations } from './body-mutations.ts'
 
 /** Column shims: element selector → attribute to stamp. */
 const COLUMN_SHIMS: ReadonlyArray<readonly [selector: string, attribute: string]> = [
@@ -75,6 +75,14 @@ export const RESPONSIVE_CSS = `
   [data-dsh-frame][data-sidebar-collapsed] [data-pane="sidebar"] [data-dsh-responsive-part="sidebar-toggle"] {
     pointer-events: auto;
     display: inline-flex !important;
+  }
+  /* The official settings dialog renders inside the sidebar foot, so collapsing
+     the rail would both hide it (the rule above) and freeze it (a collapsed pane
+     sets pointer-events: none). Restore only the subtree that actually carries an
+     open dialog; with no dialog open the collapsed rail is unchanged (issue #1510). */
+  [data-dsh-frame][data-sidebar-collapsed] [data-pane="sidebar"] > [data-slot="sidebar"] > :first-child > :not(:first-child):has([role="dialog"], [aria-modal="true"]) {
+    display: flex !important;
+    pointer-events: auto;
   }
   /* Center-view plugins own this marker; the aggregate shell owns its mobile offset. */
   [data-dsh-frame][data-sidebar-collapsed] [data-dsh-center-view-back] {
@@ -337,27 +345,6 @@ function applyShims(): boolean {
   return changed
 }
 
-/**
- * Coalesce mutation bursts into one pass per frame. React renders burst
- * dozens of subtree mutations per commit; stamping on every single mutation
- * callback turned each render into many querySelector sweeps. A scheduled
- * rAF plus a done flag folds the whole burst into a single pass, and the
- * idempotence check stops the work entirely once every attribute is set.
- */
-function schedulePass(): void {
-  if (shimScheduled) return
-  shimScheduled = true
-  requestAnimationFrame(() => {
-    shimScheduled = false
-    applyShims()
-    shimAfterPass?.()
-  })
-}
-
-/** True while a coalesced pass is pending. */
-let shimScheduled = false
-let shimAfterPass: (() => void) | undefined
-
 function installBootShield(): { dismiss: () => void; remove: () => void } {
   if (typeof document === 'undefined') return { dismiss: () => {}, remove: () => {} }
   let splash = document.querySelector<HTMLElement>('div[data-dsh-boot-splash]')
@@ -426,16 +413,12 @@ export function apply(ctx: Context): void {
       dismissFrame = frame
     }
     ensureMobileDismiss()
-    shimAfterPass = ensureMobileDismiss
     // The shell renders after boot settlement and React can re-create the
-    // columns on re-render; re-stamp on any DOM mutation. The callback only
-    // schedules a coalesced pass — mutations never run the sweep inline, and
-    // the pass short-circuits once every attribute is in place. Writes only
-    // the same attribute values, so this never fights React. The observation
-    // is the page-wide hub (shared/client/body-mutations.ts) so the aggregate
-    // no longer adds a body observer of its own beside the family plugins'.
-    const unsubscribeBody = subscribeBodyMutations(() => {
-      schedulePass()
+    // columns on re-render. The hub already coalesces callbacks per frame;
+    // scheduling another frame here would delay hooks and leave work alive
+    // after this effect is disposed. Attribute writes remain idempotent.
+    const unsubscribeBody = subscribeBodyInvalidations(() => {
+      applyShims()
       ensureMobileDismiss()
     })
     return () => {
@@ -443,8 +426,6 @@ export function apply(ctx: Context): void {
       bootShield.remove()
       responsiveStyle.remove()
       removeMobileDismiss()
-      shimAfterPass = undefined
-      shimScheduled = false
     }
   })
 }

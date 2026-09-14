@@ -145,7 +145,8 @@ const SKIN_BACKGROUND_DEFAULTS = {
 	backgroundBlurEmpty: 0,
 	backgroundBlurContent: 0,
 	inputCardBlur: 10,
-	bubbleOpacity: 50
+	bubbleOpacity: 50,
+	bubbleBlur: 10
 };
 /** The fields normalize/sanitize know about; unknown keys are dropped. */
 const SKIN_BACKGROUND_FIELDS = Object.keys(SKIN_BACKGROUND_DEFAULTS);
@@ -157,7 +158,8 @@ const RANGES = {
 	backgroundBlurEmpty: [0, 20],
 	backgroundBlurContent: [0, 20],
 	inputCardBlur: [0, 20],
-	bubbleOpacity: [0, 100]
+	bubbleOpacity: [0, 100],
+	bubbleBlur: [0, 20]
 };
 function isRecord$1(value) {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -759,7 +761,7 @@ const REVIEWED_SKIN_HOOKS = {
 	},
 	"miku": {
 		entry: "hooks.mjs",
-		manifestSha256: "9022628fd39e8ee48aef3b311c12f8411b4cc99d62764e84aa65fb4a5a3631ab",
+		manifestSha256: "a1c713e59ed31eaf43f136205e1326d35419d83d613107423099cef2c992c621",
 		hooksSha256: "1c4052d328ac6e1ede3115395e8823c4f6acecd3b4508b85615006a88f7cbdd1"
 	},
 	"minecraft": {
@@ -9384,7 +9386,8 @@ const SkinBackgroundConfigSchema = z.object({
 	backgroundBlurEmpty: z.number().min(0).max(20).step(1).default(SKIN_BACKGROUND_DEFAULTS.backgroundBlurEmpty),
 	backgroundBlurContent: z.number().min(0).max(20).step(1).default(SKIN_BACKGROUND_DEFAULTS.backgroundBlurContent),
 	inputCardBlur: z.number().min(0).max(20).step(1).default(SKIN_BACKGROUND_DEFAULTS.inputCardBlur),
-	bubbleOpacity: z.number().min(0).max(100).step(5).default(SKIN_BACKGROUND_DEFAULTS.bubbleOpacity)
+	bubbleOpacity: z.number().min(0).max(100).step(5).default(SKIN_BACKGROUND_DEFAULTS.bubbleOpacity),
+	bubbleBlur: z.number().min(0).max(20).step(1).default(SKIN_BACKGROUND_DEFAULTS.bubbleBlur)
 });
 /**
 * Settings namespace for the Wallpaper Engine bridge, owned by the skin

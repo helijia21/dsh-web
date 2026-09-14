@@ -61,12 +61,30 @@ describe('liangshen preset composition', () => {
 
   it('declares both plugin configs explicitly', () => {
     expect(row('minimal-prompt')).toContain('keepPlanPolicy: true')
-    expect(row('minimal-prompt')).toContain('instructionHint: true')
+    expect(row('minimal-prompt')).toContain('instructionSource: system-prompt')
+    expect(row('minimal-prompt')).toContain('instructionMaxBytes: 65536')
     expect(row('tool-catalog')).toContain('descriptionMaxLength: 200')
   })
 
-  it('stages the Standard roster behind the anchor turn', () => {
+  it('anchors the first turn on bash, str_replace_editor, exit_plan_mode, skill and presents PTC after it', () => {
     expect(row('tool-catalog')).toContain('anchorTools: [bash, str_replace_editor, exit_plan_mode, skill]')
+    expect(row('tool-catalog')).toContain('ptcPresentation: true')
+  })
+
+  it('supports bash-only configuration experiment via anchorTools row without registry changes', () => {
+    const bashOnlyPreset = preset.replace(
+      'anchorTools: [bash, str_replace_editor, exit_plan_mode, skill]',
+      'anchorTools: [bash]'
+    )
+    expect(validateAgentCordis(bashOnlyPreset)).toEqual([])
+  })
+
+  it('keeps run_code the only model-authored orchestration surface', () => {
+    // The builtin PTC preset's one roster difference: the engine row stays for
+    // `ralph`, the workflow tool does not publish beside `run_code`.
+    const workflow = row('workflow-worker-thread')
+    expect(workflow).toContain("name: '@deepseek-ai/dsh-tool-workflow'")
+    expect(workflow).toContain('disabled: true')
   })
 
   it('accepts the persona section name the installed SDK registers', () => {

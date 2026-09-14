@@ -1,5 +1,5 @@
 {
-  "generated": "2026-09-11",
+  "generated": "2026-09-14",
   "items": [
     {
       "id": "whale-song",
@@ -525,8 +525,8 @@
       "nameEn": "Hatsune Miku",
       "author": "涂山苏苏",
       "rank": 10,
-      "tagline": "蓝紫双马尾 · 01 编号 · 音符波形 · 电子歌姬主题",
-      "description": "以世界第一的虚拟歌姬初音未来为灵感的主题皮肤：蓝紫洋红渐变贯穿全局，音符与声波曲线点缀在半透明面板之间，标题栏与状态栏带有 01 编号徽标与音乐波形，半透明毛玻璃面板透出背景图——沉浸式电子歌姬氛围。",
+      "tagline": "初音青绿机甲方格 · 明暗双主题独立配色 · 会话栏全透明露出壁纸",
+      "description": "初音未来主题的整体重做：明亮档是青空舞台（冷调青白平涂 + 墨蓝描边 + 硬投影），暗色档是夜海霓虹（深蓝平涂 + 青绿冷光边 + 品红高光），两套配色各自独立；会话栏完全透明让壁纸直通，面板改用机甲斜切角、拉丝金属与青蓝品红渐变描边，输入区做成座舱凹槽并配主题色光标，左上角字标为代号铭牌加渐变名号；界面字体换成 Bahnschrift 几何无衬线，顶栏与底栏收起，正文与设置面板按明暗两套分别校验可读性。",
       "tags": [
         "miku",
         "vocaloid",
@@ -535,8 +535,8 @@
         "idol",
         "waveform"
       ],
-      "version": "0.2.0",
-      "accent": "#2e9bff",
+      "version": "0.3.0",
+      "accent": "#39c5bb",
       "preview": {
         "light": "assets/skins/miku/preview/light.jpg",
         "dark": "assets/skins/miku/preview/dark.jpg"
@@ -915,6 +915,66 @@
         "client": {
           "entry": "hooks.mjs",
           "apiVersion": "x-org.linxin666.skin-center/v1alpha1"
+        }
+      }
+    },
+    {
+      "id": "observatory",
+      "name": "天文台",
+      "nameEn": "Observatory",
+      "author": "stushansusu",
+      "rank": 27,
+      "tagline": "午夜靛 · 老黄铜 · 穹顶肋缝 · 时辰刻度",
+      "description": "山顶天文台的观测室：黄铜仪器、午夜靛的天。不是「工程蓝图」那套制图——那是青线网格；这套是圆、弧、刻度、铆钉，全是线，没有一处面积填充。中性层是午夜靛，只带色温不带彩度；老黄铜是全场唯一有彩度的东西，只走线、走字、走点睛。母题是观测室本身：穹顶的纬度环与扇形肋缝、底部的十二时辰刻度带、一排黄铜铆钉，加上首屏的观测环（方位刻度／赤经赤纬读数／十字丝）、星等标尺与水准泡。红只留给需要你看一眼的信号灯。",
+      "tags": [
+        "observatory",
+        "brass",
+        "midnight",
+        "dome",
+        "reticle",
+        "instrument",
+        "scale",
+        "precise",
+        "css-only",
+        "dark-only"
+      ],
+      "version": "1.0.0",
+      "accent": "#c2a55a",
+      "preview": {
+        "light": "assets/skins/observatory/preview/light.jpg",
+        "dark": "assets/skins/observatory/preview/dark.jpg"
+      },
+      "files": [
+        "README.md",
+        "README.zh.md",
+        "assets/dome-plate-dark.svg",
+        "assets/dome-plate-light.svg",
+        "assets/hero-reticle-dark.svg",
+        "assets/hero-reticle-light.svg",
+        "assets/observatory-bg.webp",
+        "assets/ws-sleeve-dark.svg",
+        "assets/ws-sleeve-light.svg",
+        "patches.css",
+        "preview/dark.jpg",
+        "preview/light.jpg",
+        "skin.css",
+        "skin.json"
+      ],
+      "repo": "https://github.com/zhu1090093659/dsh-web/tree/dev/packages/skins/skin-center/skins/observatory",
+      "contributes": {
+        "stylesheet": "skin.css",
+        "patches": "patches.css",
+        "backgroundMedia": {
+          "light": {
+            "type": "image",
+            "src": "assets/skins/observatory/assets/observatory-bg.webp",
+            "scrim": "linear-gradient(180deg, rgba(8,10,16,0.40) 0%, rgba(8,10,16,0.48) 45%, rgba(8,10,16,0.64) 100%)"
+          },
+          "dark": {
+            "type": "image",
+            "src": "assets/skins/observatory/assets/observatory-bg.webp",
+            "scrim": "linear-gradient(180deg, rgba(8,10,16,0.40) 0%, rgba(8,10,16,0.48) 45%, rgba(8,10,16,0.64) 100%)"
+          }
         }
       }
     },
@@ -1914,6 +1974,121 @@
             "type": "image",
             "src": "assets/skins/blue-throated-bee-eater/assets/blue-throated-bee-eater.jpg",
             "scrim": "linear-gradient(rgba(6, 30, 45, 0.30) 0%, rgba(6, 30, 45, 0.22) 45%, rgba(6, 30, 45, 0.36) 100%)"
+          }
+        }
+      }
+    },
+    {
+      "id": "whalechan-harness",
+      "name": "Whale-chan 鲸鱼娘",
+      "nameEn": "Whale-chan Harness",
+      "author": "Whale-chan Theme contributors",
+      "rank": 1050,
+      "tagline": "鲸鱼娘骑鲸品牌 · 海洋蓝界面 · Harness 工具同人图标",
+      "description": "面向 DeepSeek Harness Web GUI 的非官方 Whale-chan 社区同人皮肤。包含骑鲸品牌标志、工作区与文件图标、工具调用与控制图标、权限护盾、会话及子代理状态视觉。此 Skin Center 版本为纯声明式皮肤，不执行客户端 Hooks。",
+      "tags": [
+        "whalechan",
+        "whale",
+        "ocean",
+        "blue",
+        "anime",
+        "tool-icons"
+      ],
+      "version": "1.0.0",
+      "accent": "#248bda",
+      "preview": {
+        "light": "assets/skins/whalechan-harness/preview/light.jpg",
+        "dark": "assets/skins/whalechan-harness/preview/dark.jpg"
+      },
+      "files": [
+        "LICENSE",
+        "NOTICE",
+        "README.i18n.yaml",
+        "README.md",
+        "README.zh.md",
+        "assets/background-dark.jpg",
+        "assets/background-light.jpg",
+        "assets/control-fanart/command-permission-shield-64.png",
+        "assets/control-fanart/context-injection-card-64.png",
+        "assets/control-fanart/control-add-session-64.png",
+        "assets/control-fanart/control-branch-64.png",
+        "assets/control-fanart/control-close-panel-64.png",
+        "assets/control-fanart/control-command-add-64.png",
+        "assets/control-fanart/control-copy-64.png",
+        "assets/control-fanart/control-dislike-64.png",
+        "assets/control-fanart/control-files-nav-64.png",
+        "assets/control-fanart/control-goal-clear-64.png",
+        "assets/control-fanart/control-goal-edit-64.png",
+        "assets/control-fanart/control-goal-pause-64.png",
+        "assets/control-fanart/control-like-64.png",
+        "assets/control-fanart/control-more-options-64.png",
+        "assets/control-fanart/control-new-session-64.png",
+        "assets/control-fanart/control-queue-64.png",
+        "assets/control-fanart/control-search-64.png",
+        "assets/control-fanart/control-send-64.png",
+        "assets/control-fanart/control-session-log-64.png",
+        "assets/control-fanart/control-settings-64.png",
+        "assets/control-fanart/control-sidebar-close-64.png",
+        "assets/control-fanart/control-sidebar-open-64.png",
+        "assets/control-fanart/control-stop-64.png",
+        "assets/control-fanart/control-subagents-64.png",
+        "assets/control-fanart/control-todo-64.png",
+        "assets/control-fanart/control-view-options-64.png",
+        "assets/control-fanart/control-workspace-add-64.png",
+        "assets/control-fanart/hero-agent-mode-64.png",
+        "assets/control-fanart/perm-shield-full-64.png",
+        "assets/control-fanart/perm-shield-readonly-64.png",
+        "assets/control-fanart/perm-shield-write-64.png",
+        "assets/control-fanart/session-active-beacon-64.png",
+        "assets/control-fanart/workspace-folder-closed-64.png",
+        "assets/status/05-context-feeding.png",
+        "assets/status/07-subagent-outsourcing.png",
+        "assets/status/08-rice-before-reasoning.png",
+        "assets/status-icons/error-splash.svg",
+        "assets/status-icons/success-spark.svg",
+        "assets/tool-fanart/ask-64.png",
+        "assets/tool-fanart/edit-64.png",
+        "assets/tool-fanart/glob-64.png",
+        "assets/tool-fanart/grep-64.png",
+        "assets/tool-fanart/image-64.png",
+        "assets/tool-fanart/pwsh-64.png",
+        "assets/tool-fanart/read-64.png",
+        "assets/tool-fanart/subagent-64.png",
+        "assets/tool-fanart/thinking-64.png",
+        "assets/tool-fanart/todo-64.png",
+        "assets/tool-fanart/toolcall-64.png",
+        "assets/tool-fanart/web-64.png",
+        "assets/tool-fanart/workflow-64.png",
+        "assets/tool-fanart/write-64.png",
+        "assets/ui-fanart/compact-memory-20.png",
+        "assets/ui-fanart/file-document-18.png",
+        "assets/ui-fanart/file-folder-add-18.png",
+        "assets/ui-fanart/file-folder-closed-18.png",
+        "assets/ui-fanart/file-folder-open-16.png",
+        "assets/ui-fanart/file-folder-open-18.png",
+        "assets/ui-fanart/workspace-folder-closed-16.png",
+        "assets/ui-fanart/workspace-folder-open-16.png",
+        "assets/whalechan-riding-whale-64.png",
+        "patches.css",
+        "preview/dark.jpg",
+        "preview/light.jpg",
+        "skin.css",
+        "skin.json"
+      ],
+      "repo": "https://github.com/online111111/whalechan-dsh-theme",
+      "contributes": {
+        "stylesheet": "skin.css",
+        "patches": "patches.css",
+        "backgroundMedia": {
+          "light": {
+            "type": "image",
+            "src": "assets/skins/whalechan-harness/assets/background-light.jpg",
+            "scrim": "linear-gradient(rgba(247, 252, 255, 0.1), rgba(233, 247, 252, 0.2))"
+          },
+          "dark": {
+            "type": "image",
+            "src": "assets/skins/whalechan-harness/assets/background-dark.jpg",
+            "scrim": "linear-gradient(rgba(5, 18, 32, 0.18), rgba(8, 25, 43, 0.32))"
           }
         }
       }

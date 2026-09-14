@@ -2,14 +2,14 @@
  * New-task modal: title + description + the prompt that execution will send.
  * Creates through the Host and closes only after the Host confirms it.
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { BoardController } from '../../core/controller.ts'
 import { isValidCron, nextRunAtMs } from '../../core/schedule.ts'
 import { parseFreezeRequest } from '../../core/freeze-snapshot.ts'
-import { TASK_PERMISSIONS, type TaskPermission, type TaskRecord } from '../../core/tasks.ts'
+import { collectKnownTags, TASK_PERMISSIONS, type TaskPermission, type TaskRecord, type TaskTag } from '../../core/tasks.ts'
 import { t, type TaskBoardKey } from '../locales.ts'
 import { SCHEDULE_PRESETS } from '../schedule-presets.ts'
-import { ModalShell, TaskContentFields } from './TaskForm.tsx'
+import { ModalShell, TaskContentFields, TaskTagFields, cleanTags } from './TaskForm.tsx'
 import css from '../board.module.css'
 
 export interface NewTaskModalProps {
@@ -17,17 +17,22 @@ export interface NewTaskModalProps {
   onClose: () => void
   /** Optional task template to clone/duplicate from. */
   initialTask?: TaskRecord
+  /**
+   * Workspace the board's project filter has selected (#1536): a task created
+   * while a project is open belongs to that project unless the user changes it.
+   */
+  defaultWorkspaceId?: string
   /** Optional callback after successful duplication (e.g. to archive source). */
   onDuplicateSuccess?: (sourceTaskId: string) => Promise<void>
 }
 
 /** New-task form overlay. */
-export function NewTaskModal({ controller, onClose, initialTask, onDuplicateSuccess }: NewTaskModalProps) {
+export function NewTaskModal({ controller, onClose, initialTask, defaultWorkspaceId, onDuplicateSuccess }: NewTaskModalProps) {
   const isDuplicate = initialTask !== undefined
   const [title, setTitle] = useState(initialTask?.title ?? '')
   const [description, setDescription] = useState(initialTask?.description ?? '')
   const [prompt, setPrompt] = useState(initialTask?.prompt ?? '')
-  const [workspaceId, setWorkspaceId] = useState(initialTask?.workspaceId ?? '')
+  const [workspaceId, setWorkspaceId] = useState(initialTask?.workspaceId ?? defaultWorkspaceId ?? '')
   const [mode, setMode] = useState(initialTask?.mode ?? '')
   const [permission, setPermission] = useState(initialTask?.permission ?? '')
   const [model, setModel] = useState(initialTask?.model ?? '')
@@ -40,10 +45,20 @@ export function NewTaskModal({ controller, onClose, initialTask, onDuplicateSucc
   const [handoverText, setHandoverText] = useState(
     initialTask?.handover?.references !== undefined ? initialTask.handover.references.join('\n') : '',
   )
+  const [tags, setTags] = useState<TaskTag[]>(initialTask?.tags ?? [])
   const [archiveOriginal, setArchiveOriginal] = useState(true)
   const [error, setError] = useState<string | undefined>(undefined)
   const [pending, setPending] = useState(false)
   const [options, setOptions] = useState(controller.getSnapshot().executionOptions)
+  // "Parse pasted text" (issue #1540) exists only when the deployment carries a
+  // parse face; the section stays hidden otherwise.
+  const [canParse] = useState(controller.getSnapshot().canParseTask === true)
+  const [parseText, setParseText] = useState('')
+  const [parseModel, setParseModel] = useState('')
+  const [parsePending, setParsePending] = useState(false)
+  const [parseError, setParseError] = useState<string | undefined>(undefined)
+  const parseAbort = useRef<AbortController | undefined>(undefined)
+  const parseModels = options.models ?? []
 
   // The workspace list and preset roster arrive from the runtime after mount;
   // follow them so the pickers never freeze on an empty snapshot.
@@ -51,6 +66,36 @@ export function NewTaskModal({ controller, onClose, initialTask, onDuplicateSucc
     () => controller.subscribe(() => setOptions(controller.getSnapshot().executionOptions)),
     [controller],
   )
+
+  // The model roster arrives asynchronously: default to its first entry, which
+  // the user can change before parsing.
+  useEffect(() => {
+    if (parseModel === '' && parseModels.length > 0) setParseModel(parseModels[0]!.id)
+  }, [parseModel, options.models])
+
+  const runParse = async (): Promise<void> => {
+    const text = parseText.trim()
+    if (text === '') {
+      setParseError(t('new.aiParseEmpty'))
+      return
+    }
+    const abort = new AbortController()
+    parseAbort.current = abort
+    setParsePending(true)
+    setParseError(undefined)
+    try {
+      const draft = await controller.parseTaskDraft({ text, ...(parseModel === '' ? {} : { model: parseModel }) }, abort.signal)
+      setTitle(draft.title)
+      setDescription(draft.description)
+      setPrompt(draft.prompt)
+    } catch (parseFailure) {
+      // A cancelled parse reports nothing: the user asked for it to stop.
+      if (!abort.signal.aborted) setParseError(parseFailure instanceof Error ? parseFailure.message : String(parseFailure))
+    } finally {
+      parseAbort.current = undefined
+      setParsePending(false)
+    }
+  }
 
   const submit = async (): Promise<void> => {
     if (scheduleEnabled) {
@@ -81,6 +126,9 @@ export function NewTaskModal({ controller, onClose, initialTask, onDuplicateSucc
       mode: mode === '' ? undefined : mode,
       permission: permission === '' ? undefined : permission as TaskPermission,
     }
+    // Blank rows never reach the wire: the protocol rejects a tag with an
+    // empty name, and an empty list is expressed by omitting the field.
+    const tagList = cleanTags(tags)
     setPending(true)
     const task = await controller.createTaskConfirmed({
       title,
@@ -93,6 +141,7 @@ export function NewTaskModal({ controller, onClose, initialTask, onDuplicateSucc
       permission: permission === '' ? undefined : permission as TaskPermission,
       model: model === '' ? undefined : model,
       ...(reuseSession ? { reuseSession: true } : {}),
+      ...(tagList.length > 0 ? { tags: tagList } : {}),
       schedule: scheduleEnabled ? { enabled: true, cron: scheduleCron.trim() } : undefined,
     })
     if (task === undefined) {
@@ -127,6 +176,50 @@ export function NewTaskModal({ controller, onClose, initialTask, onDuplicateSucc
       onSubmit={() => { void submit() }}
       onClose={onClose}
     >
+      {canParse && (
+        <section className={css.aiParse} data-dsh-part="ai-parse">
+          <span className={css.fieldLabel}>{t('new.aiParse')}</span>
+          <p className={css.fieldHint}>{t('new.aiParseHint')}</p>
+          <textarea
+            className={css.input}
+            rows={3}
+            value={parseText}
+            placeholder={t('new.aiParsePlaceholder')}
+            spellCheck={false}
+            onChange={event => { setParseText(event.target.value); setParseError(undefined) }}
+          />
+          <div className={css.aiParseRow}>
+            <select
+              className={css.select}
+              value={parseModel}
+              aria-label={t('new.aiParseModel')}
+              onChange={event => { setParseModel(event.target.value) }}
+            >
+              {parseModels.map(option => (
+                <option key={option.id} value={option.id}>{option.name ?? option.id}</option>
+              ))}
+            </select>
+            {parsePending
+              ? (
+                <button type="button" className={css.ghostButton} onClick={() => { parseAbort.current?.abort() }}>
+                  {t('new.aiParseCancel')}
+                </button>
+                )
+              : (
+                <button
+                  type="button"
+                  className={css.primaryButton}
+                  disabled={parseText.trim() === ''}
+                  onClick={() => { void runParse() }}
+                >
+                  {t('new.aiParseRun')}
+                </button>
+                )}
+          </div>
+          {parseError !== undefined && <p className={css.formError}>{parseError}</p>}
+        </section>
+      )}
+
       <TaskContentFields
         title={title}
         description={description}
@@ -135,6 +228,8 @@ export function NewTaskModal({ controller, onClose, initialTask, onDuplicateSucc
         onDescriptionChange={setDescription}
         onPromptChange={setPrompt}
       />
+
+      <TaskTagFields tags={tags} knownTags={collectKnownTags(controller.getSnapshot().tasks)} onChange={setTags} />
 
         <label className={css.field}>
           <span className={css.fieldLabel}>{t('new.freeze')}</span>

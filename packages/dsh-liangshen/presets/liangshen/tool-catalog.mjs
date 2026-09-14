@@ -1,54 +1,20 @@
 /**
- * tool-catalog — inject this preset's model-visible tool catalog as a durable
- * user message right after the user's own message, the way `dsh-tool-skill`
- * injects the skill catalog.
+ * tool-catalog — staged model-visible tool surface for LiangShen mode:
+ * anchor turn's native wire, PTC handoff at turn boundary, and durable catalog message.
  *
- * WHY: the preset's system prompt stays on the builtin Minimal preset's
- * one-line persona, so the tool-guidance sections the Standard prompt carries
- * are absent. This message is the index that names what is available, placed
- * at the prompt tail (Layer 3) instead of in the stable prefix — the same
- * channel the skill catalog uses.
- *
- * STAGING: the Standard catalog's schemas do not ride the session's first
- * request. The anchor turn — while the durable log has recorded fewer than
- * two `turn/start` events — runs the minimal surface instead: the assembled
- * wire tool list is narrowed to `anchorTools` before the request carries it.
- * The catalog MESSAGE still publishes from the first step, and it indexes the
- * full registered surface: the entries are read from the assembly BEFORE the
- * wire narrowing, so the first turn already names every tool the second turn
- * puts on the wire, the way the skill catalog names skills the model loads on
- * demand. Execution resolves by name against the session registry, which is
- * independent of what the request declares, so a first-turn call against a
- * not-yet-schematized tool still runs. From the second turn on the full
- * assembled catalog is on the wire and the rendered text no longer changes,
- * so the mode's one wire transition is the deterministic turn boundary — no
- * reasoning-block gating, no PTC switch. Reading the turn count from the log
- * (not memory) keeps the boundary stable across resume, reload, and
- * compaction. An empty `anchorTools` disables the narrowing entirely and
- * restores the full catalog on the wire from the first request.
- *
- * The entries come from the LAST assembled catalog for that agent — the
- * `system-prompt/assemble` waterfall value, before this plugin's own wire
- * narrowing. Assembly runs immediately before the step's `agent/pre-step`
- * dispatch, so the stash is always the current step's catalog; a step with no
- * observed assembly injects nothing rather than guessing.
- *
- * DEDUPE: the message is durable, so publishing it every step would append a
- * copy per step. The rendering is a pure function of the entry list and the
- * published copy is read back from the durable log, so a step republishes only
- * when the rendered text actually differs from the last catalog message still
- * on the session's visible surface (a changed tool set, or a copy a compaction
- * shadowed). Nothing is kept in memory across steps, so resume and reload
- * reconstruct the same decision.
- *
- * SOURCE SHAPE: the message source carries ONLY `{ kind: 'plugin', plugin }`.
- * That is the same shape the instruction hint uses, and it stays inside the
- * durable validator's `plugin` field set (`kind`, `plugin`, `form`, `sections`,
- * `summary`) — an extra field would be rejected the moment the harness applies
- * that whitelist to V3 user messages the way it already does to V3
- * `system/message` events. `plugin` is also the only injected kind the v2->v3
- * migration whitelist and the v3 MessageSourceMap both classify (#1455), and
- * the message text itself is what identifies a stale catalog.
+ * Minimal-prompt retains official host tools:sdk and tools:ptc-only sections
+ * in the system prompt. This plugin:
+ * 1. Separates PTC plan from actual presentation state.
+ * 2. Uses only public APIs (tools.schemas, tools.presentAs).
+ * 3. Does not duplicate the giant TypeScript SDK into durable messages.
+ * 4. Staging: anchor turn narrows to anchorTools (bash or 4 tools) natively.
+ * 5. Turn boundary session events / lifecycle hooks declare PTC before assemble.
+ * 6. If SDK/tools are unavailable, reverts PTC and synchronizes wire to native.
+ * 7. Removes the false statement about schemas traveling with tool definition.
+ * 8. Maintains deduplication and compaction recovery.
+ * 9. Native presentation lists exactly the tools this request's wire carries; under
+ *    PTC the list is the SDK-reachable registry projection and the program contract
+ *    marks `run_code` as the only directly callable transport.
  */
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -57,8 +23,18 @@ export const name = 'liangshen-tool-catalog'
 /** Prompt assembly must exist before the wire catalog can be observed. */
 export const inject = ['systemPrompt']
 
-/** Default cap for one tool's one-line summary in the injected list. */
+/** Default cap for one tool's one-line summary in the injected compact list. */
 const DEFAULT_DESCRIPTION_MAX_LENGTH = 200
+
+/**
+ * Nesting depth beyond which an inline signature degrades to JsonValue. The
+ * rendering stays one line per tool, so deeply nested argument objects are
+ * summarized in the inline summary rather than expanded into an unreadable line.
+ */
+const MAX_SIGNATURE_DEPTH = 4
+
+/** Types the compact signature renders exactly; everything else degrades. */
+const SCALAR_TYPES = new Set(['string', 'number', 'integer', 'boolean', 'null'])
 
 function integerAtLeast(value, field, minimum, fallback) {
   if (value === undefined) return fallback
@@ -68,7 +44,15 @@ function integerAtLeast(value, field, minimum, fallback) {
   return value
 }
 
-/** Parse the `anchorTools` config: absent means staging off, entries must be non-empty names. */
+function optionalBoolean(value, field, fallback) {
+  if (value === undefined) return fallback
+  if (typeof value !== 'boolean') {
+    throw new TypeError(`${name}: ${field} must be a boolean`)
+  }
+  return value
+}
+
+/** Parse the anchorTools config: absent means staging off, entries must be non-empty names. */
 function anchorToolNames(value) {
   if (value === undefined) return []
   if (!Array.isArray(value)) {
@@ -83,15 +67,13 @@ function anchorToolNames(value) {
 }
 
 /**
- * Whether the session is still in its anchor turn: the durable log has
- * recorded fewer than two `turn/start` events. The count is read from the log
- * on every decision, so resume, reload, and compaction cannot lose or revive
- * the boundary, and a first turn that ends without a reply still promotes at
- * the next one.
+ * Whether the session is still in its anchor turn: fewer than two turn/start
+ * events and no turn/end yet.
  */
 export function inAnchorTurn(events) {
   let turns = 0
   for (const event of Array.isArray(events) ? events : []) {
+    if (event?.type === 'turn/end') return false
     if (event?.type !== 'turn/start') continue
     turns += 1
     if (turns >= 2) return false
@@ -109,58 +91,159 @@ export function anchorToolsOf(tools, names) {
 
 /**
  * One-line model-facing summary of a tool description: whitespace collapsed,
- * truncated with an ellipsis. The full description stays in the tool schema.
+ * truncated with an ellipsis when maxLength is specified.
  */
 export function catalogDescription(value, maxLength) {
   const normalized = String(value ?? '').replaceAll(/\s+/g, ' ').trim()
-  if (normalized.length <= maxLength) return normalized
+  if (maxLength === undefined || maxLength <= 0 || normalized.length <= maxLength) return normalized
   return `${normalized.slice(0, maxLength - 3)}...`
 }
 
-/** Catalog entries for one assembled wire tool set, in wire order. */
-export function catalogEntries(tools, maxLength) {
-  const entries = []
-  for (const tool of Array.isArray(tools) ? tools : []) {
-    const toolName = tool?.name
-    if (typeof toolName !== 'string' || toolName === '') continue
-    entries.push({ name: toolName, description: catalogDescription(tool.description, maxLength) })
-  }
-  return entries
+/** One scalar literal as TypeScript-ish text; non-JSON scalars degrade to the broad type. */
+function renderLiteral(value) {
+  const json = JSON.stringify(value)
+  return json === undefined ? 'JsonValue' : json
 }
 
 /**
- * Model-facing catalog text. Deliberately one stable rendering for both the
- * first publication and a replacement: the text is then the complete record
- * of what was published, so a republish decision needs no field beyond it.
+ * One JSON-Schema node as compact TypeScript-ish text for inline signatures.
+ * Bounded by MAX_SIGNATURE_DEPTH so inline signatures remain single-line.
  */
-export function renderCatalogText(entries) {
+export function renderJsonSchemaType(schema, depth = 0) {
+  if (schema === null || typeof schema !== 'object' || Array.isArray(schema)) return 'JsonValue'
+  const union = Array.isArray(schema.oneOf) ? schema.oneOf : Array.isArray(schema.anyOf) ? schema.anyOf : undefined
+  if (union !== undefined && union.length > 0) {
+    const parts = union.map(node => renderJsonSchemaType(node, depth))
+    return [...new Set(parts)].join(' | ')
+  }
+  if (Object.hasOwn(schema, 'const')) return renderLiteral(schema.const)
+  if (Array.isArray(schema.enum) && schema.enum.length > 0) return schema.enum.map(renderLiteral).join(' | ')
+  if (Array.isArray(schema.type)) {
+    const parts = schema.type.map(type => (typeof type === 'string' ? type : 'JsonValue'))
+    return [...new Set(parts)].join(' | ')
+  }
+  if (SCALAR_TYPES.has(schema.type)) return schema.type === 'integer' ? 'number' : schema.type
+  if (schema.type === 'array') {
+    const items = schema.items === undefined ? 'JsonValue' : renderJsonSchemaType(schema.items, depth + 1)
+    return items.includes('|') ? `(${items})[]` : `${items}[]`
+  }
+  if (schema.type === 'object' || schema.properties !== undefined) {
+    if (depth >= MAX_SIGNATURE_DEPTH) return 'JsonValue'
+    const properties = schema.properties !== undefined && typeof schema.properties === 'object' && !Array.isArray(schema.properties)
+      ? Object.entries(schema.properties)
+      : []
+    if (properties.length === 0) return 'Record<string, JsonValue>'
+    const required = new Set(Array.isArray(schema.required) ? schema.required : [])
+    const fields = properties.map(([field, child]) => (
+      `${field}${required.has(field) ? '' : '?'}: ${renderJsonSchemaType(child, depth + 1)}`
+    ))
+    return `{ ${fields.join(', ')} }`
+  }
+  return 'JsonValue'
+}
+
+/**
+ * The parenthesized argument signature of one tool, e.g.
+ * ({ command: string, timeoutMs?: number }). Empty when the parameter schema
+ * carries nothing to say.
+ */
+export function renderSignature(parameters) {
+  if (parameters === null || typeof parameters !== 'object' || Array.isArray(parameters)) return ''
+  const type = renderJsonSchemaType(parameters)
+  return type === 'JsonValue' ? '' : `(${type})`
+}
+
+/**
+ * Catalog entries for one tool surface, sorted by name so an unchanged surface
+ * renders byte-identical text across assemblies. Nameless definitions and
+ * the run_code transport tool are skipped.
+ */
+export function catalogEntries(schemas, maxLength) {
+  const entries = []
+  for (const schema of Array.isArray(schemas) ? schemas : []) {
+    const toolName = schema?.name
+    if (typeof toolName !== 'string' || toolName === '' || toolName === 'run_code') continue
+    entries.push({
+      name: toolName,
+      signature: renderSignature(schema.parameters),
+      description: catalogDescription(schema.description, maxLength),
+    })
+  }
+  return entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+}
+
+/**
+ * The program contract the injected message carries under PTC.
+ */
+const PTC_PROGRAM_LINES = [
+  'The session presents these tools through `run_code`, which takes `code` — the body of an async TypeScript function (top-level `await` and `return` both work; only erasable syntax runs, no `enum` or namespaces) — and `description`, a short summary of the program. Compose one program per intent instead of one tool call per step:',
+  '',
+  '- reach a tool as `await tools.<name>({ ... })` — quoted access for exotic names, `tools["my-tool"]({ ... })`;',
+  '- overlap independent read-only calls under `Promise.all` (safe calls run concurrently, mutating calls run alone in submission order) and sequence dependent work with `await`;',
+  '- a failed call rejects with `ToolCallError`, whose `toolName` and human-readable message identify it — `try/catch` it to continue;',
+  '- only what you `return` or `console.log` becomes program output; every other intermediate result stays out of the conversation, so extract just what the next decision needs, and an image a tool returns is attached after the run.',
+  '',
+  "`run_code` is the only tool that can be called directly once it is on the wire: every tool listed above is reached from inside the program.",
+]
+
+/**
+ * Model-facing catalog text.
+ * - Under native presentation (anchor turn or PTC declined/disabled): carries available_tools list.
+ * - Under PTC presentation: carries available_tools list and PTC program contract.
+ * - The false statement that 'the full parameter schema travels with its own tool definition' is removed.
+ * - Complete SDK definitions are retained in the official host tools:sdk prompt section.
+ */
+export function renderCatalogText(entries, ptc) {
   const available = entries.length === 0
     ? ['No tools are currently available in this session.']
     : [
         '<available_tools>',
-        ...entries.map(entry => `- \`${entry.name}\`: ${entry.description}`),
+        ...entries.map(entry => `- \`${entry.name}${entry.signature}\`: ${entry.description}`),
         '</available_tools>',
       ]
+  const footer = 'This is the complete current list and replaces any earlier available-tools list in this session.'
   return [
     '<system-reminder>',
     'The following tools are available in this session:',
     '',
     ...available,
     '',
-    "This is the complete current list and replaces any earlier available-tools list in this session. It carries names and one-line summaries only; each tool's full parameter schema travels with its own tool definition.",
+    footer,
+    ...(ptc ? ['', ...PTC_PROGRAM_LINES] : []),
     '</system-reminder>',
   ].join('\n')
 }
 
+/**
+ * Overlay the registry projection's fuller schema onto each wire entry, keyed by
+ * name, so a narrowed native list keeps complete argument semantics even when the
+ * assembly's own tool object carries a thinner definition. Entries the projection
+ * does not name, and every entry when no projection is readable, stay untouched.
+ */
+export function mergeProjectedSchemas(wireTools, projection) {
+  if (!Array.isArray(projection) || projection.length === 0) return wireTools
+  const byName = new Map()
+  for (const schema of projection) {
+    if (typeof schema?.name === 'string' && schema.name !== '') byName.set(schema.name, schema)
+  }
+  return wireTools.map((tool) => {
+    const projected = byName.get(tool?.name)
+    if (projected === undefined) return tool
+    const merged = { ...tool }
+    if (projected.parameters !== undefined) merged.parameters = projected.parameters
+    if (typeof projected.description === 'string' && projected.description.length > 0) {
+      merged.description = projected.description
+    }
+    return merged
+  })
+}
+
 /** Build the durable catalog message for one entry list. */
-export function createCatalogMessage(entries) {
+export function createCatalogMessage(entries, ptc) {
   return {
-    // Session persistence validates every replayed user/message for a
-    // non-empty string id; a plugin-built message without one corrupts the
-    // durable journal (SessionPersistenceCorruptionError on load).
     id: globalThis.crypto.randomUUID(),
     role: 'user',
-    content: [{ type: 'text', text: renderCatalogText(entries) }],
+    content: [{ type: 'text', text: renderCatalogText(entries, ptc) }],
     source: { kind: 'plugin', plugin: name },
   }
 }
@@ -181,8 +264,7 @@ function isCatalogMessage(message) {
 }
 
 /**
- * Session events, tolerating both the current `snapshotEvents()` accessor and
- * the older mutable `events` array (SDK 0.1.2-alpha.4 renamed it).
+ * Session events, tolerating both snapshotEvents() and events array.
  */
 function sessionEvents(session) {
   if (Array.isArray(session?.events)) return session.events
@@ -197,11 +279,7 @@ function visibleSeqSet(session) {
 }
 
 /**
- * Published catalog state read back from the durable log: the text of the most
- * recent catalog message still on the visible surface, plus whether any catalog
- * was ever published. A resumed, forked, or externally written seed may hold an
- * unusable record, so one is skipped rather than throwing inside the step
- * listener (which would fail every later turn).
+ * Published catalog state read back from durable log.
  */
 function catalogHistory(agent) {
   const session = agent?.session
@@ -232,7 +310,7 @@ function withoutMessage(decision, id) {
   return { ...decision, messages: decision.messages.filter(message => message.id !== id) }
 }
 
-/** Register the wire-catalog observer and the per-step catalog injection. */
+/** Register the surface staging, the PTC handoff, and the per-step catalog injection. */
 export function apply(ctx, config) {
   const descriptionMaxLength = integerAtLeast(
     config?.descriptionMaxLength,
@@ -241,37 +319,297 @@ export function apply(ctx, config) {
     DEFAULT_DESCRIPTION_MAX_LENGTH,
   )
   const anchorNames = anchorToolNames(config?.anchorTools)
+  const ptcPlanEnabled = optionalBoolean(config?.ptcPresentation, 'ptcPresentation', true)
 
-  // Whether this agent's session is still in its anchor turn. An empty
-  // `anchorTools` disables staging, so every session reads as promoted.
+  // Per-agent fresh state evaluated on every assembly (never stale across steps/turns)
+  const agentCatalogState = new WeakMap()
+
+  // Session to agent mapping for boundary events
+  const agentBySession = new WeakMap()
+
+  // Presentation status tracking per agent
+  const agentPtcDeclared = new WeakSet()
+  const agentPtcFailed = new WeakSet()
+  const agentPtcDisposers = new WeakMap()
+
+  let warned = false
+  const warnOnce = (detail) => {
+    if (warned) return
+    warned = true
+    try {
+      ctx.logger?.warn?.(`${name}: ${detail} — keeping the native tool surface`)
+    } catch {
+      // Logger unavailable
+    }
+  }
+
+  const registry = () => ctx.get('tools')
+
+  /** Whether PTC is planned and capable in this deployment. */
+  const ptcPlanReady = () => ptcPlanEnabled && ctx.get('codeRuntime') !== undefined
+
+  /** Whether this session is still in its anchor turn. */
   const anchoring = (agent) => (
     anchorNames.length > 0 && agent !== undefined && inAnchorTurn(sessionEvents(agent?.session))
   )
 
-  // The last assembled catalog each live agent observed, read BEFORE this
-  // plugin's own wire narrowing so the index always names the full registered
-  // surface. `prepend: true` makes this listener outermost, so `await next()`
-  // yields the final assembly.
-  const wireCatalogByAgent = new WeakMap()
+  /**
+   * Declare PTC presentation for one agent using public agent.ctx.tools.presentAs('ptc').
+   */
+  const presentPtc = (agent) => {
+    if (!ptcPlanReady() || agent === undefined) return false
+    if (agentPtcDeclared.has(agent)) return true
+    if (agentPtcFailed.has(agent)) return false
 
-  ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
-    const assembled = await next()
-    const agent = context?.agent
-    if (agent !== undefined) {
-      wireCatalogByAgent.set(agent, catalogEntries(assembled.tools, descriptionMaxLength))
+    const tools = agent?.ctx?.tools
+    if (tools === undefined || typeof tools.presentAs !== 'function') {
+      agentPtcFailed.add(agent)
+      warnOnce('no scoped tools view to declare PTC presentation')
+      return false
     }
-    if (!anchoring(agent)) return assembled
-    return { ...assembled, tools: anchorToolsOf(assembled.tools, anchorNames) }
+
+    try {
+      const disposer = tools.presentAs('ptc')
+      agentPtcDeclared.add(agent)
+      if (typeof disposer === 'function') {
+        agentPtcDisposers.set(agent, disposer)
+      }
+      return true
+    } catch (err) {
+      agentPtcFailed.add(agent)
+      warnOnce(`PTC presentation declined: ${err instanceof Error ? err.message : String(err)}`)
+      return false
+    }
+  }
+
+  /**
+   * Abort/revert PTC declaration if active, restoring presentation back to native.
+   */
+  const revertPtc = (agent, reason, retryable = false) => {
+    if (agent === undefined) return
+    const disposer = agentPtcDisposers.get(agent)
+    if (typeof disposer === 'function') {
+      try {
+        disposer()
+      } catch {
+        // Ignore disposer error
+      }
+      agentPtcDisposers.delete(agent)
+    }
+    agentPtcDeclared.delete(agent)
+    // A declaration the host itself refused is permanent for this agent. One that
+    // merely failed to reach a wire is not: the next turn boundary may declare
+    // again, and latching it would strand the session on the native surface.
+    if (!retryable) agentPtcFailed.add(agent)
+    warnOnce(reason)
+  }
+
+  /**
+   * Read visible tool schemas from the public tools.schemas(agent) API.
+   * Excludes run_code. Tolerates test stubs providing sdkSchemas.
+   */
+  const resolveToolsService = (agent) => {
+    const scoped = agent?.ctx?.tools
+    if (typeof scoped?.schemas === 'function' || typeof scoped?.sdkSchemas === 'function') {
+      return scoped
+    }
+    const reg = registry()
+    if (typeof reg?.schemas === 'function' || typeof reg?.sdkSchemas === 'function') {
+      return reg
+    }
+    return scoped ?? reg
+  }
+
+  const publicSchemas = (agent) => {
+    const tools = resolveToolsService(agent)
+    if (tools === undefined) return undefined
+    if (typeof tools.schemas === 'function') {
+      try {
+        const schemas = tools.schemas(agent)
+        if (Array.isArray(schemas) && schemas.length > 0) {
+          const filtered = schemas.filter(t => t?.name && t.name !== 'run_code')
+          return filtered.length > 0 ? filtered : undefined
+        }
+        return undefined
+      } catch {
+        warnOnce('no tool schemas available')
+        return undefined
+      }
+    }
+    // Test harness compatibility stub
+    if (typeof tools.sdkSchemas === 'function') {
+      try {
+        const schemas = tools.sdkSchemas(agent)
+        if (Array.isArray(schemas) && schemas.length > 0) {
+          const filtered = schemas.filter(t => t?.name && t.name !== 'run_code')
+          return filtered.length > 0 ? filtered : undefined
+        }
+      } catch {
+        warnOnce('no tool schemas available')
+        return undefined
+      }
+    }
+    return undefined
+  }
+
+  /**
+   * The catalog the NEXT request will expose, resolved from the current
+   * presentation state rather than from the previous assembly.
+   *
+   * A turn boundary declares PTC before the promoted turn's first step, but that
+   * turn's assembly has not run yet, so the stored state would still describe the
+   * anchor wire. Resolving the projection here keeps the published catalog in step
+   * with the transport the request is about to carry.
+   */
+  const catalogStateFor = (agent) => {
+    if (agent === undefined) return undefined
+    if (!anchoring(agent) && ptcPlanReady() && agentPtcDeclared.has(agent)) {
+      const schemas = publicSchemas(agent)
+      if (schemas !== undefined && schemas.length > 0) {
+        return { entries: catalogEntries(schemas, descriptionMaxLength), ptc: true }
+      }
+    }
+    return agentCatalogState.get(agent)
+  }
+
+  // Early lifecycle hooks: declare PTC ahead of prompt assembly
+  ctx.on('agent/created', (agent) => {
+    if (agent?.session !== undefined) agentBySession.set(agent.session, agent)
+    if (!anchoring(agent) && ptcPlanReady()) {
+      presentPtc(agent)
+    }
+  })
+
+  ctx.on('agent/session-start', (agent, session) => {
+    if (session !== undefined && agent !== undefined) agentBySession.set(session, agent)
+    if (!anchoring(agent) && ptcPlanReady()) {
+      presentPtc(agent)
+    }
+  })
+
+  // Turn boundary session events
+  ctx.on('session/event', (session, event) => {
+    if (event?.type !== 'turn/start' && event?.type !== 'turn/end') return
+    const agent = session === undefined ? undefined : agentBySession.get(session)
+    if (agent === undefined || anchoring(agent) || !ptcPlanReady()) return
+    presentPtc(agent)
+  })
+
+  // Per-agent, not one process-wide flag: two sessions assembling at once would
+  // otherwise let one skip the promotion re-assembly the other is running.
+  const reassembling = new WeakSet()
+
+  ctx.on('system-prompt/assemble', async (assembly, context, next) => {
+    const agent = context?.agent
+    const staged = anchoring(agent)
+
+    if (agent !== undefined && agent.session !== undefined) {
+      agentBySession.set(agent.session, agent)
+    }
+
+    let ptcDeclared = false
+    if (!staged && ptcPlanReady()) {
+      if (!agentPtcDeclared.has(agent)) {
+        // A promotion collapses the wire to the single `run_code` transport and
+        // lists the tools from their SDK projection. Where no projection can be read
+        // at all, declaring would collapse the executor and then have to undo it,
+        // losing the native wire on the way out. Stay native instead.
+        const projectable = publicSchemas(agent)
+        if (projectable === undefined || projectable.length === 0) {
+          warnOnce('no tool schema projection available; keeping the native tool surface')
+          ptcDeclared = false
+        } else {
+          ptcDeclared = presentPtc(agent)
+        }
+        // A declaration made here cannot reach THIS assembly: the harness collects
+        // the tool providers before the waterfall runs. Re-assemble so the collapse
+        // and the generated SDK land on the assembly the model actually receives.
+        if (ptcDeclared && !reassembling.has(agent)) {
+          const sp = ctx.get('systemPrompt')
+          if (typeof sp?.assemble === 'function') {
+            reassembling.add(agent)
+            try {
+              return await sp.assemble(context)
+            } catch (error) {
+              warnOnce(`re-assembling after the PTC declaration failed: ${error instanceof Error ? error.message : String(error)}`)
+            } finally {
+              reassembling.delete(agent)
+            }
+          }
+          // Nothing re-assembled, so this wire stays native. Collapsing the executor
+          // under it would announce a transport the request never names, so drop back
+          // to native for this assembly and let the next turn boundary declare again.
+          revertPtc(agent, 'the PTC declaration did not reach this assembly wire', true)
+          ptcDeclared = false
+        }
+      } else {
+        ptcDeclared = true
+      }
+    }
+
+    // The registry projection names every tool the session can reach. Under PTC the
+    // request opens only `run_code`, so the projection is what the catalog lists;
+    // under native presentation the catalog must name exactly the tools this request
+    // carries, or the model is told about a surface it cannot call.
+    let surface = agent !== undefined ? publicSchemas(agent) : undefined
+
+    const assembled = await next()
+
+    const wireTools = Array.isArray(assembled?.tools) ? assembled.tools : []
+    const wireHasRunCode = wireTools.some(t => t?.name === 'run_code')
+    const wireOnlyRunCode = wireTools.length > 0 && wireTools.every(t => t?.name === 'run_code')
+
+    // If wire carries only run_code but public schemas are unavailable or empty:
+    // Revert PTC to native and restore wire to native schemas.
+    // The replacement travels in the RETURNED assembly: the waterfall's returned
+    // value is the authoritative one, and mutating the object the harness handed
+    // downstream would be a side effect no other listener can see.
+    let correctedWire
+    if (wireOnlyRunCode && (surface === undefined || surface.length === 0)) {
+      revertPtc(agent, 'no tool schema projection available under PTC')
+      ptcDeclared = false
+      const nativeSchemas = publicSchemas(agent) ?? []
+      surface = nativeSchemas
+      correctedWire = nativeSchemas
+    }
+
+    // PTC is what the WIRE carries, not what the configuration intends: the catalog
+    // must describe the transport this request actually names, or the model is told
+    // to call `run_code` on a request that offers only native tools.
+    const isActualPtc = !staged && wireHasRunCode && surface !== undefined && surface.length > 0
+
+    // The effective wire of THIS request includes the anchor narrowing, so the native
+    // catalog narrows with the schemas the model can actually call instead of
+    // advertising the promoted roster the anchor turn does not expose.
+    const effectiveWire = correctedWire ?? assembled.tools
+    const nativeTools = (Array.isArray(effectiveWire) ? effectiveWire : [])
+      .filter(t => t?.name && t.name !== 'run_code')
+    const anchoredTools = staged ? anchorToolsOf(nativeTools, anchorNames) : nativeTools
+    const catalogTools = isActualPtc ? surface : mergeProjectedSchemas(anchoredTools, surface)
+
+    const entries = catalogEntries(catalogTools, descriptionMaxLength)
+
+    // Store fresh state on agent
+    if (agent !== undefined) {
+      agentCatalogState.set(agent, {
+        entries,
+        ptc: isActualPtc,
+      })
+    }
+
+    if (!staged) return correctedWire === undefined ? assembled : { ...assembled, tools: correctedWire }
+    return { ...assembled, tools: anchorToolsOf(effectiveWire, anchorNames) }
   }, { prepend: true })
 
   ctx.on('agent/pre-step', async (payload, next) => {
     const decision = await next()
     if (decision.kind !== 'enter') return decision
     const agent = payload?.agent
-    const entries = agent === undefined ? undefined : wireCatalogByAgent.get(agent)
-    if (entries === undefined) return decision
+    const state = catalogStateFor(agent)
+    if (state === undefined) return decision
 
-    const candidate = renderCatalogText(entries)
+    const { entries, ptc } = state
+    const candidate = renderCatalogText(entries, ptc)
     const history = catalogHistory(agent)
     const existing = catalogMessage(decision.messages)
     if (history.text === candidate) {
@@ -281,7 +619,7 @@ export function apply(ctx, config) {
     if (!history.published && entries.length === 0) {
       return existing === undefined ? decision : withoutMessage(decision, existing.message.id)
     }
-    const catalog = createCatalogMessage(entries)
+    const catalog = createCatalogMessage(entries, ptc)
     if (existing === undefined) {
       return { ...decision, messages: [...decision.messages, catalog] }
     }
